@@ -9,6 +9,8 @@
 #include <ClickEncoder.h>
 // Install TimerOne library
 #include <TimerOne.h>
+// To read/write to EEPROM
+#include <EEPROM.h>
 
 #define VERSION "1.0.0"
 
@@ -29,10 +31,16 @@ const unsigned long LcdOnDurationMillis = 10000;
 const unsigned long LcdFlashDurationMillis = 500;
 // Maximum supported count (due to LCD size)
 const unsigned long MaxCount = 9999;
+// Maximum supported total count (accumulated over time)
+const unsigned long MaxTotalCount = 999999;
+// The EEPROM address to store total count
+const unsigned long TotalCountRomAddress = 1;
+// Indicator if EEPROM has been initialized
+const unsigned long InitFlagRomAddress = 0;
 // Boot finished time
 unsigned long _bootingEndMillis = 0;
 // LCD backlight on/off time
-unsigned long _lcdSetMillis = 0;
+unsigned long _lcdLastSetMillis = 0;
 
 // State of the system
 enum State {
@@ -57,11 +65,12 @@ unsigned long _durationMillis = 0;
 unsigned long _lastReloadMillis = 0;
 bool _isTargetReached = false;
 bool _isBacklightOn = false;
+bool _showTotalCount = false;
 
 void setup() {
     Serial.begin(115200);
     setState(booting);
-    // initialize the lcd
+
     _lcd.init();
     msg("Made by Ken", "Version " VERSION); // Print a message to the LCD.
 
@@ -69,6 +78,12 @@ void setup() {
     
     _reloadSensor.attach(RELOAD_SENSOR_PIN, INPUT_PULLUP);
     _reloadSensor.interval(5);
+
+    if (EEPROM.read(InitFlagRomAddress) != 'X') {
+        Serial.println("Init EEPROM");
+        writeTotalCount(0);
+        EEPROM.write(InitFlagRomAddress, 'X');
+    }
 
     _bootingEndMillis = millis() + 3000;
 }
@@ -96,18 +111,23 @@ void loop()
 
 void processLcdBacklight() {
     // Process LCD flashing and backlight delayed off
-    if (_isTargetReached && _lcdSetMillis != 0 && millis() - _lcdSetMillis >= LcdFlashDurationMillis) {
+    if (_isTargetReached && _lcdLastSetMillis != 0 && millis() - _lcdLastSetMillis >= LcdFlashDurationMillis) {
         _isBacklightOn = !_isBacklightOn;
         _lcd.setBacklight(_isBacklightOn);
-        _lcdSetMillis = millis();
-    } else if (_lcdSetMillis != 0 && millis() - _lcdSetMillis >= LcdOnDurationMillis && _state != reloading && _state != paused) {
+        _lcdLastSetMillis = millis();
+    } else if (_lcdLastSetMillis != 0 && millis() - _lcdLastSetMillis >= LcdOnDurationMillis && _state != reloading && _state != paused) {
         _lcd.noBacklight();
         _isBacklightOn = false;
-        _lcdSetMillis = 0;
+        _lcdLastSetMillis = 0;
     }
 }
 
 void bootingState() {
+    ClickEncoder::Button encoderButton = _encoder->getButton();
+    if (encoderButton == ClickEncoder::Held && readTotalCount() != 0) {
+        writeTotalCount(0);
+        msg("TOTAL ROUNDS", "CLEARED");
+    }
     if (millis() >= _bootingEndMillis) {
         setState(idle);
         updateIdleLcd();
@@ -127,6 +147,13 @@ void idleState() {
         _target = newTarget;
         updateIdleLcd();
     }
+    ClickEncoder::Button encoderButton = _encoder->getButton();
+    switch (encoderButton) {
+        case ClickEncoder::Clicked:
+            _showTotalCount = !_showTotalCount;
+            updateIdleLcd();
+            break;
+    }
     if (isReloadSensorTriggered()) {
         setState(reloading);
         _count = 1;
@@ -139,7 +166,7 @@ void idleState() {
 }
 
 void reloadingState() {
-    _isTargetReached = _count >= _target;
+    _isTargetReached = _count >= _target && _target != 0;
     if (isReloadSensorTriggered()) {
         ++_count;
         if (_count > MaxCount) {
@@ -201,7 +228,13 @@ void timerIsr() {
 void updateIdleLcd() {
     char line1[17];
     sprintf(line1, "TARGET: %ld", _target);
-    msg(line1, "RELOAD TO START");
+    char line2[17];
+    if (_showTotalCount) {
+        sprintf(line2, "TOTAL %ld RDS", readTotalCount());
+    } else {
+        sprintf(line2, "RELOAD TO START");
+    }
+    msg(line1, line2);
 }
 
 void updateReloadingOrPausedLcd() {
@@ -220,8 +253,6 @@ void updateReloadingOrPausedLcd() {
     sprintf(line2, "%02u:%02u:%02u %4d/HR", hours, minutes, seconds, roundsPerHour);
 
     char line1[17];
-    Serial.print("_target=");
-    Serial.println(_target);
     if (_target <= 0) {
         sprintf(line1, _state == reloading ? "%ld ROUNDS" : "%ld PAUSED", _count);
     } else {
@@ -236,6 +267,12 @@ int isReloadSensorTriggered() {
     if (reloadSensorValue) {
         Serial.print("Reload sensor: ");
         Serial.println(reloadSensorValue);
+        
+        // Write EEPROM for total count
+        unsigned long totalCount = readTotalCount() + 1;
+        Serial.print("Total count to EEPROM: ");
+        Serial.println(totalCount);
+        writeTotalCount(totalCount);
     }
     return reloadSensorValue;
 }
@@ -265,15 +302,29 @@ void setState(State newState) {
     _state = newState;
 }
 
+unsigned long readTotalCount() {
+    unsigned long totalCount;
+    EEPROM.get(TotalCountRomAddress, totalCount);
+    return totalCount;
+}
+
+void writeTotalCount(unsigned long totalCount) {
+    EEPROM.put(TotalCountRomAddress, totalCount);
+}
+
 void lcdlight() {
     _lcd.backlight();
     _isBacklightOn = true;
-    _lcdSetMillis = millis();
+    _lcdLastSetMillis = millis();
 }
 
 void msg(const char line1[], const char line2[]) {
-    Serial.println(line1);
-    Serial.println(line2);
+    Serial.print('[');
+    Serial.print(line1);
+    Serial.println(']');
+    Serial.print('[');
+    Serial.print(line2);
+    Serial.println(']');
     _lcd.clear();
     lcdlight();
     _lcd.print(line1);
