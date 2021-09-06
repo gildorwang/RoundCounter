@@ -12,7 +12,10 @@
 
 #define VERSION "1.0.0"
 
+// Connects to Reed switch or Hall sensor
 #define RELOAD_SENSOR_PIN 2
+// A1 and A0 for the rotary encoder and A2 for the push button connection
+#define CLICK_ENCODER_PINS A1, A0, A2
 
 // LCD wiring:
 // - VCC: 5V
@@ -23,10 +26,13 @@ LiquidCrystal_I2C _lcd(0x3F, 16, 2); // set the LCD address to 0x3F for a 16 cha
 
 // LCD backlight on duration
 const unsigned long LcdOnDurationMillis = 10000;
+const unsigned long LcdFlashDurationMillis = 500;
+// Maximum supported count (due to LCD size)
+const unsigned long MaxCount = 9999;
 // Boot finished time
 unsigned long _bootingEndMillis = 0;
-// Scheduled LCD backlight off time
-unsigned long _lcdOffMillis = 0;
+// LCD backlight on/off time
+unsigned long _lcdSetMillis = 0;
 
 // State of the system
 enum State {
@@ -49,6 +55,8 @@ long _count = 0;
 long _target = 0;
 unsigned long _durationMillis = 0;
 unsigned long _lastReloadMillis = 0;
+bool _isTargetReached = false;
+bool _isBacklightOn = false;
 
 void setup() {
     Serial.begin(115200);
@@ -67,107 +75,127 @@ void setup() {
 
 void loop()
 {
-    if (_lcdOffMillis != 0 && millis() > _lcdOffMillis && _state != reloading) {
-        _lcd.noBacklight();
-        Serial.println("Backlight OFF");
-        _lcdOffMillis = 0;
-    }
+    processLcdBacklight();
 
+    // Run states
     switch (_state) {
         case booting:
-            if (millis() >= _bootingEndMillis) {
-                setState(idle);
-                updateIdleLcd();
-                return;
-            }
+            bootingState();
             break;
-        case idle: {
-            long newTarget = _target + _encoder->getValue();
-            if (newTarget < 0) {
-                newTarget = 0;
-            }
-            if (newTarget >= 10000) {
-                newTarget = 9999;
-            }
-            if (newTarget != _target) {
-                _target = newTarget;
-                updateIdleLcd();
-            }
-            if (isReloadSensorTriggered()) {
-                setState(reloading);
-                _count = 1;
-                _durationMillis = 0;
-                _lastReloadMillis = millis();
-                updateReloadingOrPausedLcd();
-                return;
-            }
-            // TODO: reboot when millis() is halfway to overflow
+        case idle:
+            idleState();
             break;
+        case reloading:
+            reloadingState();
+            break;
+        case paused:
+            pausedState();
+            break;
+    }
+}
+
+void processLcdBacklight() {
+    // Process LCD flashing and backlight delayed off
+    if (_isTargetReached && _lcdSetMillis != 0 && millis() - _lcdSetMillis >= LcdFlashDurationMillis) {
+        _isBacklightOn = !_isBacklightOn;
+        _lcd.setBacklight(_isBacklightOn);
+        _lcdSetMillis = millis();
+    } else if (_lcdSetMillis != 0 && millis() - _lcdSetMillis >= LcdOnDurationMillis && _state != reloading && _state != paused) {
+        _lcd.noBacklight();
+        _isBacklightOn = false;
+        _lcdSetMillis = 0;
+    }
+}
+
+void bootingState() {
+    if (millis() >= _bootingEndMillis) {
+        setState(idle);
+        updateIdleLcd();
+    }
+}
+
+void idleState() {
+    _isTargetReached = false;
+    long newTarget = _target + _encoder->getValue();
+    if (newTarget < 0) {
+        newTarget = 0;
+    }
+    if (newTarget > MaxCount) {
+        newTarget = MaxCount;
+    }
+    if (newTarget != _target) {
+        _target = newTarget;
+        updateIdleLcd();
+    }
+    if (isReloadSensorTriggered()) {
+        setState(reloading);
+        _count = 1;
+        _durationMillis = 0;
+        _lastReloadMillis = millis();
+        updateReloadingOrPausedLcd();
+        return;
+    }
+    // TODO: reboot when millis() is halfway to overflow
+}
+
+void reloadingState() {
+    _isTargetReached = _count >= _target;
+    if (isReloadSensorTriggered()) {
+        ++_count;
+        if (_count > MaxCount) {
+            _count = MaxCount;
         }
-        case reloading: {
-            if (isReloadSensorTriggered()) {
-                ++_count;
-                if (_lastReloadMillis != 0) {
-                    _durationMillis += millis() - _lastReloadMillis;
-                }
-                _lastReloadMillis = millis();
-                updateReloadingOrPausedLcd();
-            }
-            ClickEncoder::Button encoderButton = _encoder->getButton();
-            switch (encoderButton) {
-                case ClickEncoder::Clicked:
-                    setState(paused);
-                    updateReloadingOrPausedLcd();
-                    return;
-                case ClickEncoder::Released:
-                    setState(idle);
-                    updateIdleLcd();
-                    return;
-            }
-            break;
+        if (_lastReloadMillis != 0) {
+            _durationMillis += millis() - _lastReloadMillis;
         }
-        case paused: {
-            int newCount = _count + _encoder->getValue();
-            if (newCount < 0) {
-                newCount = 0;
-            }
-            if (newCount > 9999) {
-                newCount = 9999;
-            }
-            if (newCount != _count) {
-                _count = newCount;
-                updateReloadingOrPausedLcd();
-            }
-            ClickEncoder::Button encoderButton = _encoder->getButton();
-            switch (encoderButton) {
-                case ClickEncoder::Clicked:
-                    setState(reloading);
-                    // clear last reload timestamp so it won't start counting time until one reload op
-                    _lastReloadMillis = 0;
-                    updateReloadingOrPausedLcd();
-                    return;
-                case ClickEncoder::Released:
-                    setState(idle);
-                    updateIdleLcd();
-                    return;
-            }
+        _lastReloadMillis = millis();
+        updateReloadingOrPausedLcd();
+    }
+    ClickEncoder::Button encoderButton = _encoder->getButton();
+    switch (encoderButton) {
+        case ClickEncoder::Clicked:
+            setState(paused);
+            updateReloadingOrPausedLcd();
             break;
-        }
+        case ClickEncoder::Released:
+            setState(idle);
+            updateIdleLcd();
+            break;
+    }
+}
+
+void pausedState() {
+    _isTargetReached = false;
+    int newCount = _count + _encoder->getValue();
+    if (newCount < 0) {
+        newCount = 0;
+    }
+    if (newCount > MaxCount) {
+        newCount = MaxCount;
+    }
+    if (newCount != _count) {
+        _count = newCount;
+        updateReloadingOrPausedLcd();
+    }
+    ClickEncoder::Button encoderButton = _encoder->getButton();
+    switch (encoderButton) {
+        case ClickEncoder::Clicked:
+            setState(reloading);
+            // clear last reload timestamp so it won't start counting time until one reload op
+            _lastReloadMillis = 0;
+            updateReloadingOrPausedLcd();
+            return;
+        case ClickEncoder::Released:
+            setState(idle);
+            updateIdleLcd();
+            return;
     }
 }
 
 void timerIsr() {
-    // const short BlinkPeriodInMs = 2000;
-    // const short DelayBeforeBlinkInMs = 1000;
-
-    // unsigned long now = millis();
-    // if (_state == SETTING && now % BlinkPeriodInMs < (BlinkPeriodInMs / 2) && now - _minutesLastUpdatedByUserMillis > DelayBeforeBlinkInMs) {
-    //     _sevseg.blank();
-    // } else {
-    //     displayMinutes();
-    // }
     // Run the encoder service. It needs to be run in the timer
     _encoder->service();
+
 }
 
 void updateIdleLcd() {
@@ -184,8 +212,8 @@ void updateReloadingOrPausedLcd() {
 
     int roundsPerHour = totalSeconds == 0 ? 0 : _count * 3600 / totalSeconds;
 
-    if (roundsPerHour >= 10000) {
-        roundsPerHour = 9999;
+    if (roundsPerHour > MaxCount) {
+        roundsPerHour = MaxCount;
     }
 
     char line2[17];
@@ -213,7 +241,7 @@ int isReloadSensorTriggered() {
 }
 
 void setupEncoder() {
-    _encoder = new ClickEncoder(A1, A0, A2);
+    _encoder = new ClickEncoder(CLICK_ENCODER_PINS);
     Timer1.initialize(1000);
     Timer1.attachInterrupt(timerIsr);
 }
@@ -239,7 +267,8 @@ void setState(State newState) {
 
 void lcdlight() {
     _lcd.backlight();
-    _lcdOffMillis = millis() + LcdOnDurationMillis;
+    _isBacklightOn = true;
+    _lcdSetMillis = millis();
 }
 
 void msg(const char line1[], const char line2[]) {
