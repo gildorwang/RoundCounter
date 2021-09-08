@@ -18,6 +18,8 @@
 #define RELOAD_SENSOR_PIN 2
 // A1 and A0 for the rotary encoder and A2 for the push button connection
 #define CLICK_ENCODER_PINS A1, A0, A2
+// Buzzer
+#define BUZZER_PIN 8
 
 // LCD wiring:
 // - VCC: 5V
@@ -37,6 +39,7 @@ const unsigned long MaxTotalCount = 999999;
 const unsigned long TotalCountRomAddress = 1;
 // Indicator if EEPROM has been initialized
 const unsigned long InitFlagRomAddress = 0;
+const unsigned int BuzzerFrequency = 3000;
 // Boot finished time
 unsigned long _bootingEndMillis = 0;
 // LCD backlight on/off time
@@ -73,11 +76,14 @@ void setup() {
 
     _lcd.init();
     msg("Made by Ken", "Version " VERSION); // Print a message to the LCD.
+    tone(BUZZER_PIN, BuzzerFrequency, 500);
 
     setupEncoder();
     
     _reloadSensor.attach(RELOAD_SENSOR_PIN, INPUT_PULLUP);
     _reloadSensor.interval(5);
+
+    pinMode(BUZZER_PIN, OUTPUT);
 
     if (EEPROM.read(InitFlagRomAddress) != 'X') {
         Serial.println("Init EEPROM");
@@ -88,8 +94,7 @@ void setup() {
     _bootingEndMillis = millis() + 3000;
 }
 
-void loop()
-{
+void loop() {
     processLcdBacklight();
 
     // Run states
@@ -135,7 +140,7 @@ void bootingState() {
 }
 
 void idleState() {
-    _isTargetReached = false;
+    setIsTargetReached(false);
     long newTarget = _target + _encoder->getValue();
     if (newTarget < 0) {
         newTarget = 0;
@@ -166,7 +171,7 @@ void idleState() {
 }
 
 void reloadingState() {
-    _isTargetReached = _count >= _target && _target != 0;
+    setIsTargetReached(_count >= _target && _target != 0);
     if (isReloadSensorTriggered()) {
         ++_count;
         if (_count > MaxCount) {
@@ -192,7 +197,7 @@ void reloadingState() {
 }
 
 void pausedState() {
-    _isTargetReached = false;
+    setIsTargetReached(false);
     int newCount = _count + _encoder->getValue();
     if (newCount < 0) {
         newCount = 0;
@@ -222,7 +227,15 @@ void pausedState() {
 void timerIsr() {
     // Run the encoder service. It needs to be run in the timer
     _encoder->service();
+}
 
+void setIsTargetReached(bool isTargetReached) {
+    _isTargetReached = isTargetReached;
+    if (isTargetReached) {
+        tone(BUZZER_PIN, BuzzerFrequency);
+    } else {
+        noTone(BUZZER_PIN);
+    }
 }
 
 void updateIdleLcd() {
