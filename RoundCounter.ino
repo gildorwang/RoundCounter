@@ -12,7 +12,7 @@
 // To read/write to EEPROM
 #include <EEPROM.h>
 
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 
 // Connects to Reed switch or Hall sensor
 #define RELOAD_SENSOR_PIN 2
@@ -134,8 +134,7 @@ void bootingState() {
         msg("TOTAL ROUNDS", "CLEARED");
     }
     if (millis() >= _bootingEndMillis) {
-        setState(idle);
-        updateIdleLcd();
+        enterIdleState();
     }
 }
 
@@ -170,6 +169,12 @@ void idleState() {
     // TODO: reboot when millis() is halfway to overflow
 }
 
+void enterIdleState() {
+    tone(BUZZER_PIN, BuzzerFrequency, 100);
+    setState(idle);
+    updateIdleLcd();
+}
+
 void reloadingState() {
     setIsTargetReached(_count >= _target && _target != 0);
     if (isReloadSensorTriggered()) {
@@ -186,12 +191,21 @@ void reloadingState() {
     ClickEncoder::Button encoderButton = _encoder->getButton();
     switch (encoderButton) {
         case ClickEncoder::Clicked:
+            // Click once to reduce one round, frequently used when the brass is not good
+            --_count;
+            if (_count < 0) {
+                _count = 0;
+            } else {
+                writeTotalCount(readTotalCount() - 1);
+            }
+            updateReloadingOrPausedLcd();
+            break;
+        case ClickEncoder::DoubleClicked:
             setState(paused);
             updateReloadingOrPausedLcd();
             break;
-        case ClickEncoder::Released:
-            setState(idle);
-            updateIdleLcd();
+        case ClickEncoder::Held:
+            enterIdleState();
             break;
     }
 }
@@ -216,11 +230,10 @@ void pausedState() {
             // clear last reload timestamp so it won't start counting time until one reload op
             _lastReloadMillis = 0;
             updateReloadingOrPausedLcd();
-            return;
-        case ClickEncoder::Released:
-            setState(idle);
-            updateIdleLcd();
-            return;
+            break;
+        case ClickEncoder::Held:
+            enterIdleState();
+            break;
     }
 }
 
@@ -282,10 +295,7 @@ int isReloadSensorTriggered() {
         Serial.println(reloadSensorValue);
         
         // Write EEPROM for total count
-        unsigned long totalCount = readTotalCount() + 1;
-        Serial.print("Total count to EEPROM: ");
-        Serial.println(totalCount);
-        writeTotalCount(totalCount);
+        writeTotalCount(readTotalCount() + 1);
     }
     return reloadSensorValue;
 }
@@ -322,6 +332,8 @@ unsigned long readTotalCount() {
 }
 
 void writeTotalCount(unsigned long totalCount) {
+    Serial.print("Total count to EEPROM: ");
+    Serial.println(totalCount);
     EEPROM.put(TotalCountRomAddress, totalCount);
 }
 
